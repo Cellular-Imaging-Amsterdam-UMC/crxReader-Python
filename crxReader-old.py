@@ -1,52 +1,8 @@
 import sqlite3
 import numpy as np
 from PIL import Image
-import tifffile as tifffile
 import os
 from datetime import datetime, timedelta
-
-"""
-crxreader Function
-
-Overview:
-    The `crxreader` function reads and processes data from a CellReporterXpress experiment SQLite database.
-    It can extract metadata, process image data for specific wells and tiles, and save the images in specified formats.
-
-Parameters:
-    experiment_file (str): Path to the experiment file.
-    verbose (int, optional): Verbosity level for output logs (default: 0).
-    channel (int, optional): Channel number to process (default: 1).
-    well (str, optional): Identifier for the specific well to process (default: None).
-    tile (str or int, optional): Specific tile to process or 'all' for all tiles (default: None).
-    level (int, optional): Image pyramid level to process (default: 0).
-    save_as (str, optional): Path to save the processed image(s) (default: None).
-    tiff_compression (str, optional): TIFF compression type; options are 'none', 'lzw', or 'deflate' (default: 'deflate').
-    info (dict, optional): Preloaded dictionary for experiment metadata (default: None).
-
-Returns:
-    dict: Metadata about the experiment (if no well or tile is specified).
-    numpy.ndarray: Processed image data (if a well or tile is specified and valid).
-
-Usage Examples:
-    # Example 1: Extract metadata from an experiment file
-    info = crxreader('path/to/experiment.db')
-
-    # Example 2: Process and save a specific well and tile as a TIFF image
-    imdata = crxreader('path/to/experiment.db', well='B2', tile=1, save_as='output.tif', info=info)
-
-    # Example 3: Process an image at a specific level and save it
-    imdata = crxreader('path/to/experiment.db', well='A1', level=3, save_as='output_level3.tif')
-
-Notes:
-    - Ensure the experiment file exists and is accessible.
-    - Supported image formats for saving are '.tif' and '.png'.
-    - The function supports processing single tiles or all tiles for a well.
-    - The metadata includes well and channel details, experiment information, and image acquisition parameters.
-
-License:
-    This code is distributed under the MIT License.
-"""
-
 
 # Main function to read and process data
 def crxreader(experiment_file, **kwargs):
@@ -60,8 +16,6 @@ def crxreader(experiment_file, **kwargs):
     save_as = kwargs.get('save_as', None)
     tiff_compression = kwargs.get('tiff_compression', 'deflate')
     info = kwargs.get('info', None)
-
-    well=remove_leading_zero(well) # Remove leading zero from well name
 
     # Check if the file exists
     is_ok = False
@@ -160,7 +114,7 @@ def crxreader(experiment_file, **kwargs):
                         imdata[data[1]:data[1]+data[3],data[0]:data[0]+data[2]] = sub_image_data
 
                 if not tile:
-                    do_save(imdata, save_as, tile, channel, level, well, tiff_compression, verbose, info['well_info'])
+                    do_save(imdata, save_as, tile, channel, level, well, tiff_compression, verbose)
                     do_disp('Ready Reading Well',verbose)
                     return imdata
                 elif not level : # If tile is specified and full level is requested
@@ -179,7 +133,7 @@ def crxreader(experiment_file, **kwargs):
                                 xs = txs + info['well_info']['xs']
                                 ys = tys + info['well_info']['ys']
                                 outdata.append(imdata[tys:ys,txs:xs])
-                            do_save(outdata, save_as, tile, channel, level, well, tiff_compression, verbose, info['well_info'])
+                            do_save(outdata, save_as, tile, channel, level, well, tiff_compression, verbose)
                             do_disp(f'Ready Reading all tiles from well: {well}',verbose)
                         else:
                             do_disp(f'Error Reading Well, tile {tile} does not exist',verbose)
@@ -191,16 +145,16 @@ def crxreader(experiment_file, **kwargs):
                             ty = (tile - 1) // info['well_info']['tilex']
                             xs = tx * info['well_info']['xs']
                             ys = ty * info['well_info']['ys']
-                            xse = xs + info['well_info']['xs'] 
-                            yse = ys + info['well_info']['ys']                       
+                            xse = xs + info['well_info']['xs'] - max(row[2] for row in zd) - 1
+                            yse = ys + info['well_info']['ys'] - max(row[3] for row in zd) - 1
 
                             # Find the bounding coordinates for the tile
                             zdx = sorted(set(row[0] for row in zd))
                             zdy = sorted(set(row[1] for row in zd))
                             xmin = max(x for x in zdx if x <= xs)
-                            xmax = min((x for x in zdx if x >= xse), default=xse)
+                            xmax = min(x for x in zdx if x >= xse)
                             ymin = max(y for y in zdy if y <= ys)
-                            ymax = min((y for y in zdy if y >= yse), default=yse)
+                            ymax = min(y for y in zdy if y >= yse)
 
                             # Filter zd for the current tile
                             zd = [row for row in zd if xmin <= row[0] <= xmax and ymin <= row[1] <= ymax]
@@ -241,7 +195,7 @@ def crxreader(experiment_file, **kwargs):
                                 yend = min(ystart + info['well_info']['ys'], imdata.shape[0])
 
                                 imdata = imdata[ystart:yend,xstart:xend]
-                                do_save(imdata, save_as, tile, channel, level, well, tiff_compression, verbose, info['well_info'])
+                                do_save(imdata, save_as, tile, channel, level, well, tiff_compression, verbose)
                                 do_disp(f'Ready Reading Tile: {tile} from Well: {well}',verbose)
                                 return imdata
                         else:
@@ -290,7 +244,7 @@ def read_well_info(image_data, channel_data):
         'ys': image_data[0],
         'xres': image_data[3],
         'yres': image_data[3],
-        'objective': image_data[2]
+        'objective': image_data[3]
     }
     for i in range(well_info['channels']):
         well_info['emission'].append(channel_data[i][0])
@@ -303,26 +257,13 @@ def read_well_info(image_data, channel_data):
             well_info['lutname'].append(channel_data[i][4].split()[-1].lower())
     return well_info
 
-def do_save(imdata, save_as, tile, channel, level, well, tiff_compression, verbose, well_info):
-    """
-    Save image data to TIFF or PNG formats, supporting metadata for TIFF files.
-
-    Parameters:
-        imdata (numpy.ndarray or list): Image data to save.
-        save_as (str): Path and filename to save the image.
-        tile (str or int): Tile information for naming.
-        channel (int): Channel number.
-        level (int): Image pyramid level.
-        well (str): Well identifier.
-        tiff_compression (str): Compression type for TIFF ('none', 'lzw', 'deflate').
-        verbose (int): Verbosity level for logging.
-        well_info (dict): Dictionary containing well metadata, including pixel size and LUT name.
-    """
+# Save image data
+def do_save(imdata, save_as, tile, channel, level, well, tiff_compression, verbose):
     if not save_as:
         return
 
     spath, sname = os.path.split(save_as)
-    sname, ext = os.path.splitext(sname)
+    sname, ext = os.path.splitext(sname) 
 
     # Construct the filename based on the provided parameters
     sname += f"_ch{channel}_{add_leading_zero(well)}"
@@ -331,79 +272,27 @@ def do_save(imdata, save_as, tile, channel, level, well, tiff_compression, verbo
         tile = 'full'  # If tile is not specified, set it to full
 
     if ext not in ['.tif', '.png']:
-        do_disp('Error, Only .tif or .png are supported!', verbose)
+        do_disp('Error, Only .tif or .png are supported!',verbose) # Extension not supported
         return
 
     if not os.path.isdir(spath) and spath:
-        do_disp('Error, Path not found, image not saved!', verbose)
+        do_disp('Error, Path not found, image not saved!',verbose) # Path not found
         return
 
     spath += '/' if spath else ''
-
     valid_compression_types = {'none', 'lzw', 'deflate'}
     if tiff_compression.lower() not in valid_compression_types:
-        do_disp("Error, Only 'none', 'lzw', and 'deflate' are supported TIFF compression values!", verbose)
+        do_disp("Error, Only 'none', 'lzw', and 'deflate' are supported .tif compression values!") # Compression type not supported
         return
 
-    # Extract calibration and LUT information from well_info
-    pixel_width = well_info.get('xres', 1.0)
-    pixel_height = well_info.get('yres', 1.0)
-    magnification = well_info.get('objective', 'unknown')
-    xres = 1e4 / pixel_width
-    yres = 1e4 / pixel_height    
-    lut_name = well_info.get('lutname', [])[channel - 1] if 'lutname' in well_info and channel - 1 < len(well_info['lutname']) else 'unknown'
-
-    # Ensure image data is a list for consistency
+    # Save the image(s)
     imdata = [imdata] if not isinstance(imdata, list) else imdata
-
     for im_index, img in enumerate(imdata, start=1):
         fname = f"{spath}{sname}_{add_leading_zero(str(im_index if len(imdata) > 1 else tile))}{ext}"
-        if ext == '.tif':
-            # Save as TIFF with manual metadata modification
-            import tifffile
-            from tifffile import TiffWriter
+        Image.fromarray(img).save(fname, compression=tiff_compression.lower())
+    do_disp('Image Saved!', verbose)
 
-            with TiffWriter(fname, bigtiff=False) as tif:
-                tif.write(
-                    img,
-                    compression=tiff_compression.lower(),
-                    resolution=(xres, yres),                # sets XResolution, YResolution
-                    resolutionunit='CENTIMETER',            # sets ResolutionUnit to 3
-                    description=(
-                        f"ImageJ=1.53c\n"
-                        f"unit=micron\n"
-                        f"spacing={pixel_height}\n"
-                        f"pixel_width={pixel_width}\n"
-                        f"pixel_height={pixel_height}\n"
-                        f"LUT={lut_name}\n"
-                        f"magnification={magnification}\n"
-                    )
-                )                
-        elif ext == '.png':
-            # Save as PNG
-            Image.fromarray(img).save(fname)
 
-        do_disp(f"Image saved as {fname}", verbose)
-
-def remove_leading_zero(well_name: str) -> str:
-    """
-    Convert something like 'C02' into 'C2'.
-    Assumes the first char is a letter, and the rest are digits.
-    """
-    if not well_name:
-        return well_name  # or raise an error
-
-    letter_part = well_name[0]       # e.g. 'C'
-    digit_part = well_name[1:]       # e.g. '02'
-
-    # Convert the digits to int, then back to string => removes leading zeros
-    try:
-        digit_part_noleading = str(int(digit_part))  # '02' -> int(2) -> '2'
-    except ValueError:
-        # If digit_part isn't purely digits, handle gracefully
-        return well_name  # or raise an error
-
-    return letter_part + digit_part_noleading
 
 # Convert .NET ticks to datetime
 def convert_dotnet_ticks_to_datetime(net_ticks):
@@ -414,20 +303,3 @@ def convert_dotnet_ticks_to_datetime(net_ticks):
     microseconds_remainder = (ticks_since_epoch % TICKS_PER_SECOND) // 10  # convert from 100-nanoseconds to microseconds
     utc_datetime = datetime(1970, 1, 1) + timedelta(seconds=seconds_since_epoch, microseconds=microseconds_remainder)
     return utc_datetime
-
-def pretty_print_info(info):
-    """
-    Pretty print the metadata information.
-
-    Parameters:
-        info (dict): Metadata dictionary containing experiment details.
-    """
-    print("\nExperiment Metadata:")
-    print("-------------------")
-    for key, value in info.items():
-        if isinstance(value, dict):
-            print(f"{key}:")
-            for sub_key, sub_value in value.items():
-                print(f"  {sub_key}: {sub_value}")
-        else:
-            print(f"{key}: {value}")

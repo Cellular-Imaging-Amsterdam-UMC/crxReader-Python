@@ -5,51 +5,46 @@ import tifffile as tifffile
 import os
 from datetime import datetime, timedelta
 
-"""
-crxreader Function
-
-Overview:
-    The `crxreader` function reads and processes data from a CellReporterXpress experiment SQLite database.
-    It can extract metadata, process image data for specific wells and tiles, and save the images in specified formats.
-
-Parameters:
-    experiment_file (str): Path to the experiment file.
-    verbose (int, optional): Verbosity level for output logs (default: 0).
-    channel (int, optional): Channel number to process (default: 1).
-    well (str, optional): Identifier for the specific well to process (default: None).
-    tile (str or int, optional): Specific tile to process or 'all' for all tiles (default: None).
-    level (int, optional): Image pyramid level to process (default: 0).
-    save_as (str, optional): Path to save the processed image(s) (default: None).
-    tiff_compression (str, optional): TIFF compression type; options are 'none', 'lzw', or 'deflate' (default: 'deflate').
-    info (dict, optional): Preloaded dictionary for experiment metadata (default: None).
-
-Returns:
-    dict: Metadata about the experiment (if no well or tile is specified).
-    numpy.ndarray: Processed image data (if a well or tile is specified and valid).
-
-Usage Examples:
-    # Example 1: Extract metadata from an experiment file
-    info = crxreader('path/to/experiment.db')
-
-    # Example 2: Process and save a specific well and tile as a TIFF image
-    imdata = crxreader('path/to/experiment.db', well='B2', tile=1, save_as='output.tif', info=info)
-
-    # Example 3: Process an image at a specific level and save it
-    imdata = crxreader('path/to/experiment.db', well='A1', level=3, save_as='output_level3.tif')
-
-Notes:
-    - Ensure the experiment file exists and is accessible.
-    - Supported image formats for saving are '.tif' and '.png'.
-    - The function supports processing single tiles or all tiles for a well.
-    - The metadata includes well and channel details, experiment information, and image acquisition parameters.
-
-License:
-    This code is distributed under the MIT License.
-"""
-
-
-# Main function to read and process data
 def crxreader(experiment_file, **kwargs):
+    """
+    Reads and processes data from a CellReporterXpress experiment SQLite database.
+
+    Parameters:
+        experiment_file (str): Path to the experiment file.
+        verbose (int, optional): Verbosity level for output logs (default: 0).
+        channel (int, optional): Channel number to process (default: 1).
+        well (str, optional): Identifier for the specific well to process (default: None).
+        tile (str or int, optional): Specific tile to process or 'all' for all tiles (default: None).
+        level (int, optional): Image pyramid level to process (default: 0).
+        time_point (int, optional): TimePoint value corresponding to TimeSeriesElementId (default: 0).
+        save_as (str, optional): Path to save the processed image(s) (default: None).
+        tiff_compression (str, optional): TIFF compression type; options are 'none', 'lzw', or 'deflate' (default: 'deflate').
+        info (dict, optional): Preloaded dictionary for experiment metadata (default: None).
+        show_well_matrix (bool, optional): If True, display a matrix of wells used for each timepoint (default: False).
+
+    Returns:
+        dict: Metadata about the experiment (if no well or tile is specified).
+        numpy.ndarray: Processed image data (if a well or tile is specified and valid).
+
+    Usage Examples:
+        # Example 1: Extract metadata from an experiment file
+        info = crxreader('path/to/experiment.db')
+
+        # Example 2: Process and save a specific well and tile as a TIFF image
+        imdata = crxreader('path/to/experiment.db', well='B2', tile=1, save_as='output.tif', info=info)
+
+        # Example 3: Process an image at a specific level and save it
+        imdata = crxreader('path/to/experiment.db', well='A1', level=3, save_as='output_level3.tif')
+
+    Notes:
+        - Ensure the experiment file exists and is accessible.
+        - Supported image formats for saving are '.tif' and '.png'.
+        - The function supports processing single tiles or all tiles for a well.
+        - The metadata includes well and channel details, experiment information, and image acquisition parameters.
+
+    License:
+        This code is distributed under the MIT License.
+    """
 
     # Set default values
     verbose = kwargs.get('verbose', 0)
@@ -57,11 +52,13 @@ def crxreader(experiment_file, **kwargs):
     well = kwargs.get('well', None)
     tile = kwargs.get('tile', None)
     level = kwargs.get('level', 0)
+    time_point = kwargs.get('time_point', 0)  # Added TimePoint parameter
     save_as = kwargs.get('save_as', None)
     tiff_compression = kwargs.get('tiff_compression', 'deflate')
     info = kwargs.get('info', None)
+    show_well_matrix = kwargs.get('show_well_matrix', False)  # Added parameter to display well matrix
 
-    well=remove_leading_zero(well) # Remove leading zero from well name
+    well = remove_leading_zero(well)  # Remove leading zero from well name
 
     # Check if the file exists
     is_ok = False
@@ -70,74 +67,80 @@ def crxreader(experiment_file, **kwargs):
             info = {}
             info['experiment_file'] = experiment_file
             filepath = os.path.dirname(experiment_file)
-            info['images_file'] = os.path.join(filepath, 'images-0.db')
+            info['images_file'] = None  # To be determined dynamically
             do_disp('Reading Info from CellReporterXpress experiment.db file', verbose)
             try:
                 # Connect to the SQLite database
                 with sqlite3.connect(experiment_file) as conn:
                     cur = conn.cursor()
-                    # Fetch experiment base data
+
+                    # Check for TimeSeriesElementId values
+                    cur.execute("SELECT DISTINCT TimeSeriesElementId FROM SourceImageBase")
+                    time_series_ids = [row[0] for row in cur.fetchall()]
+
+                    if len(time_series_ids) == 1 and time_series_ids[0] == 0:
+                        # Only one TimeSeriesElementId (0), ignore time_point
+                        time_point = 0
+                        info['images_file'] = os.path.join(filepath, 'images-0.db')
+                    else:
+                        # Determine the appropriate images-x.db file for the given TimePoint
+                        if time_point not in time_series_ids:
+                            raise ValueError(f"Invalid TimePoint: {time_point}. Available values: {time_series_ids}")
+                        info['images_file'] = os.path.join(filepath, f'images-{time_point}.db')
+
+                    # Fetch additional metadata
                     cur.execute('SELECT DateCreated, Creator, Name FROM ExperimentBase')
                     rs = cur.fetchone()
-                    # Fetch acquisition experiment name
-                    cur.execute('SELECT Name FROM AcquisitionExp')
-                    rse = cur.fetchone()
-                    # Convert date and time
                     dt = convert_dotnet_ticks_to_datetime(int(rs[0]))
-                    do_disp(f"Name: {rs[2]}", verbose)
-                    do_disp(f"Creator: {rs[1]}", verbose)
-                    do_disp(f"Protocol: {rse[0]}", verbose)
-                    do_disp(f"Date: {dt.strftime('%Y-%m-%d %H:%M UTC')}", verbose)
-                    # Store information in the info dictionary
                     info.update({
                         'name': rs[2],
                         'creator': rs[1],
-                        'protocol': rse[0],
                         'dt': dt,
                     })
-                    # Fetch well information
-                    cur.execute('SELECT Name, ZoneIndex FROM well WHERE HasImages = 1')
-                    wells = cur.fetchall()
+
                     # Fetch additional info required to read well info
                     cur.execute('SELECT SensorSizeYPixels, SensorSizeXPixels, Objective, PixelSizeUm, SensorBitness, SitesX, SitesY FROM AcquisitionExp, AutomaticZonesParametersExp')
                     rsdI = cur.fetchone()
                     cur.execute('SELECT Emission, Excitation, Dye, channelNumber, ColorName FROM ImagechannelExp')
                     rsdC = cur.fetchall()
-                    # Process well information
+
+                    # Process and store well information
                     info['well_info'] = read_well_info(rsdI, rsdC)
+
+                    # Fetch well data
+                    cur.execute('SELECT Name, ZoneIndex FROM well WHERE HasImages = 1')
+                    wells = cur.fetchall()
                     info['numwells'] = len(wells)
                     info['wells'] = {well[0]: well[1] for well in wells}
                 is_ok = True
-                do_disp('Ready Reading Info!', verbose)
             except sqlite3.Error as e:
-                do_disp('Error Reading Info from file!', verbose)
-                do_disp('Format of data in file is different than expected.', verbose)
+                do_disp(f'Error Reading Info: {str(e)}', verbose)
         else:
             is_ok = True
             do_disp('Using given Info!', verbose)
     else:
-        do_disp('Error File not Found!', verbose)
+        do_disp('Error: File not found!', verbose)
 
-    # If only information is requested
+    if show_well_matrix and is_ok:
+        display_well_matrix(info, experiment_file)
+        return info
+
     if not well and not tile and is_ok:
         return info
 
-    # If Well and/or image data is requested
+    # Read image data if well is specified
     if well and is_ok:
-        # Check if well is in the info and proceed if everything is okay
         if well in info['wells']:
-            # get well ZoneData
-            zi = info['wells'][well]
-            # Connect to the SQLite database
-            conn = sqlite3.connect(info['experiment_file'])
-            cur = conn.cursor()
-            cur.execute('''
-                SELECT CoordX, CoordY, SizeX, SizeY, BitsPerPixel, ImageIndex, channelId 
-                FROM SourceImageBase 
-                WHERE ZoneIndex = ? AND level = ? 
-                ORDER BY CoordX ASC, CoordY ASC
-                ''', (zi, level))
-            zd = cur.fetchall()
+            zone_index = info['wells'][well]
+            with sqlite3.connect(info['experiment_file']) as conn:
+                cur = conn.cursor()
+                cur.execute('''
+                    SELECT CoordX, CoordY, SizeX, SizeY, BitsPerPixel, ImageIndex, channelId 
+                    FROM SourceImageBase
+                    WHERE ZoneIndex = ? AND level = ? AND TimeSeriesElementId = ?
+                    ORDER BY CoordX ASC, CoordY ASC
+                ''', (zone_index, level, time_point))
+                zd = cur.fetchall()
             conn.close()
 
             # Filter the data for the specified channel
@@ -258,21 +261,6 @@ def crxreader(experiment_file, **kwargs):
             return None
         
 
-# Function to display text if verbose is enabled
-def do_disp(text, verbose):
-    if verbose:
-        print(text)
-
-# Function to add leading zero to a string containing a number
-def add_leading_zero(input_string):
-    if len(input_string) == 1:
-        return '0' + input_string
-    else:
-        number_parts = [part for part in input_string.split() if part.isdigit()]
-        if number_parts and int(number_parts[0]) < 10:
-            return input_string.replace(number_parts[0], '0' + number_parts[0])
-        return input_string
-
 # Function to read well information
 def read_well_info(image_data, channel_data):
     well_info = {
@@ -385,6 +373,21 @@ def do_save(imdata, save_as, tile, channel, level, well, tiff_compression, verbo
 
         do_disp(f"Image saved as {fname}", verbose)
 
+# Function to display text if verbose is enabled
+def do_disp(text, verbose):
+    if verbose:
+        print(text)
+
+# Function to add leading zero to a string containing a number
+def add_leading_zero(input_string):
+    if len(input_string) == 1:
+        return '0' + input_string
+    else:
+        number_parts = [part for part in input_string.split() if part.isdigit()]
+        if number_parts and int(number_parts[0]) < 10:
+            return input_string.replace(number_parts[0], '0' + number_parts[0])
+        return input_string
+    
 def remove_leading_zero(well_name: str) -> str:
     """
     Convert something like 'C02' into 'C2'.
@@ -414,6 +417,43 @@ def convert_dotnet_ticks_to_datetime(net_ticks):
     microseconds_remainder = (ticks_since_epoch % TICKS_PER_SECOND) // 10  # convert from 100-nanoseconds to microseconds
     utc_datetime = datetime(1970, 1, 1) + timedelta(seconds=seconds_since_epoch, microseconds=microseconds_remainder)
     return utc_datetime
+
+def display_well_matrix(info, experiment_file):
+    """
+    Displays a matrix of wells used for each timepoint with well names.
+
+    Parameters:
+        info (dict): Metadata dictionary containing well and timepoint information.
+        experiment_file (str): Path to the experiment SQLite database.
+    """
+    with sqlite3.connect(experiment_file) as conn:
+        cur = conn.cursor()
+
+        # Fetch all TimeSeriesElementId values
+        cur.execute("SELECT DISTINCT TimeSeriesElementId FROM SourceImageBase")
+        time_series_ids = [row[0] for row in cur.fetchall()]
+
+        # Fetch well data
+        cur.execute("SELECT Name, ZoneIndex FROM Well WHERE HasImages = 1")
+        wells = cur.fetchall()
+
+        well_names = [add_leading_zero(well[0]) for well in wells]
+        well_matrix = []
+
+        for timepoint in time_series_ids:
+            cur.execute("""
+                SELECT DISTINCT Well.Name FROM SourceImageBase
+                JOIN Well ON SourceImageBase.ZoneIndex = Well.ZoneIndex
+                WHERE TimeSeriesElementId = ?
+            """, (timepoint,))
+            wells_at_timepoint = [add_leading_zero(row[0]) for row in cur.fetchall()]
+
+            row = [well if well in wells_at_timepoint else '' for well in well_names]
+            well_matrix.append(row)
+
+        print("Timepoint x Well Matrix:")
+        for idx, row in enumerate(well_matrix):
+            print(f"Timepoint {time_series_ids[idx]}: {row}")
 
 def pretty_print_info(info):
     """
